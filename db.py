@@ -3,11 +3,11 @@ import pandas as pd
 import requests
 from ta.trend import EMAIndicator, MACD
 from ta.momentum import RSIIndicator
-from ta.volatility import BollingerBands
+from ta.volatility import BollingerBands, AverageTrueRange
 from vaderSentiment.vaderSentiment import SentimentIntensityAnalyzer
 
 # ========== CONFIG ==========
-SYMBOLS = ['BTCUSDT', 'ETHUSDT', 'SOLUSDT']
+SYMBOLS = ['BTCUSDT', 'ETHUSDT', 'SOLUSDT', 'BNBUSDT']
 TIMEFRAMES = {'1m': '1m', '5m': '5m', '15m': '15m', '1h': '1h', '1d': '1d'}
 LIMIT = 100
 BASE_URL = "https://fapi.binance.com"
@@ -34,19 +34,46 @@ def apply_indicators(df):
     macd = MACD(df['close'])
     df['MACD'] = macd.macd()
     df['MACD_Signal'] = macd.macd_signal()
-    bb = BollingerBands(df['close'])
-    df['BB_High'] = bb.bollinger_hband()
-    df['BB_Low'] = bb.bollinger_lband()
     return df
 
-def make_decision(df):
+def find_support_resistance(df, lookback=20):
+    highs = df['high'].rolling(window=lookback).max()
+    lows = df['low'].rolling(window=lookback).min()
+    return highs.iloc[-1], lows.iloc[-1]
+
+def make_decision(df, strategy="Bollinger Bands"):
     last = df.iloc[-1]
     signal = "Neutral"
+    entry = last['close']
+
     if last['EMA_9'] > last['EMA_21'] and last['RSI'] < 70 and last['MACD'] > last['MACD_Signal']:
         signal = "Bullish"
     elif last['EMA_9'] < last['EMA_21'] and last['RSI'] > 30 and last['MACD'] < last['MACD_Signal']:
         signal = "Bearish"
-    return signal, last['close'], round(last['close'] * 1.02, 2), round(last['close'] * 0.99, 2)
+
+    if strategy == "Bollinger Bands":
+        bb = BollingerBands(df['close'])
+        tp = bb.bollinger_hband().iloc[-1] if signal == "Bullish" else bb.bollinger_lband().iloc[-1]
+        sl = entry - 1.5 * (entry * 0.01) if signal == "Bullish" else entry + 1.5 * (entry * 0.01)
+
+    elif strategy == "ATR":
+        atr = AverageTrueRange(df['high'], df['low'], df['close'], window=14).average_true_range().iloc[-1]
+        tp = entry + 2 * atr if signal == "Bullish" else entry - 2 * atr
+        sl = entry - 1.5 * atr if signal == "Bullish" else entry + 1.5 * atr
+
+    elif strategy == "Support/Resistance":
+        resistance, support = find_support_resistance(df)
+        tp = resistance if signal == "Bullish" else support
+        sl = entry - (entry * 0.015) if signal == "Bullish" else entry + (entry * 0.015)
+
+    elif strategy == "AI (Coming Soon)":
+        tp = entry * 1.02
+        sl = entry * 0.99
+
+    else:
+        tp = sl = None
+
+    return signal, entry, round(tp, 2), round(sl, 2)
 
 def get_news():
     url = "https://cryptopanic.com/api/v1/posts/?auth_token=demo&public=true"
@@ -66,16 +93,19 @@ def analyze_sentiment(news):
 st.set_page_config(page_title="Crypto Trading Dashboard", layout="wide")
 st.title("Crypto Trading Signal Dashboard")
 
-for symbol in SYMBOLS:
-    st.subheader(symbol)
-    cols = st.columns(len(TIMEFRAMES))
-    for i, (label, tf) in enumerate(TIMEFRAMES.items()):
-        df = get_klines(symbol, tf)
-        df = apply_indicators(df)
-        signal, entry, tp, sl = make_decision(df)
-        with cols[i]:
-            st.metric(label=f"{label} Signal", value=signal)
-            st.text(f"Entry: ${entry:.2f}\nTP: ${tp} | SL: ${sl}")
+strategy_option = st.selectbox("Select TP/SL Strategy", ["Bollinger Bands", "ATR", "Support/Resistance", "AI (Coming Soon)"])
+
+selected_symbol = st.selectbox("Select Coin", SYMBOLS)
+st.subheader(f"{selected_symbol}")
+cols = st.columns(len(TIMEFRAMES))
+
+for i, (label, tf) in enumerate(TIMEFRAMES.items()):
+    df = get_klines(selected_symbol, tf)
+    df = apply_indicators(df)
+    signal, entry, tp, sl = make_decision(df, strategy=strategy_option)
+    with cols[i]:
+        st.metric(label=f"{label} Signal", value=signal)
+        st.text(f"Entry: ${entry:.2f}\nTP: ${tp} | SL: ${sl}")
 
 # ========== SENTIMENT SECTION ==========
 st.markdown("---")
@@ -89,4 +119,4 @@ for h in news:
 sentiment_status = "Positive" if sentiment > 0.2 else "Negative" if sentiment < -0.2 else "Neutral"
 st.metric(label="Sentiment Score", value=f"{sentiment:.2f}", delta=sentiment_status)
 
-st.caption("Powered by Binance Futures + Technical Analysis + News Sentiment")
+st.caption("Powered by Binance Futures + TA + Sentiment + Smart TP/SL")
